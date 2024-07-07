@@ -82,7 +82,6 @@ class GenCol(Generic[T]):
 
     def items(self) -> Generator[tuple[int | str, T], None, None]:
         """Iterate over all values and their keys."""
-
         yield from enumerate(self.sequence)
         yield from self.named.items()
 
@@ -138,6 +137,9 @@ class GenCol(Generic[T]):
     def zip(self, *args: "GenCol") -> Generator:
         """
         Zip together corresponding elements of the collections.
+
+        Keys will be used to match up corresponding elements but then
+        excluded from the result.
 
         :param args: Extra arguments to pass to `func`. Must be other
             `GenCol`s with matching structure.

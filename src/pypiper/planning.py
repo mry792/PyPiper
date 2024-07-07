@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from itertools import chain
 from typing import TypeVar
 
-from pypiper.graph.gencol import GenCol
+from pypiper.utils import GenCol
 
 T = TypeVar("T")
 
@@ -97,9 +97,8 @@ class PlanningAgent:
 
     async def instantiate(
         self,
-        *iterables: AsyncIterable,
-        **named_iterables: AsyncIterable,
-    ) -> GenCol[AsyncIterable] | AsyncIterable:
+        input_streams: GenCol[AsyncIterable],
+    ) -> GenCol[AsyncIterable]:
         """Create the computation graph using the given inputs."""
         raise NotImplementedError()
 
@@ -109,10 +108,11 @@ class PlanningAgent:
         **named_iterables: Iterable | AsyncIterable,
     ) -> GenCol[AsyncIterable] | AsyncIterable:
         """Create the computation graph using the given inputs."""
-        return await (
-            GenCol(list(iterables), named_iterables)
-            .map(_ensure_async)
-            .invoke(self.instantiate)
+        return await self.instantiate(
+            GenCol(
+                list(iterables),
+                named_iterables,
+            ).map(_ensure_async),
         )
 
 
