@@ -39,12 +39,12 @@ async def main():
         print(x)
 
 
-async def test_shell():
-    proc = await create_subprocess_shell(
-        "tee", stdin=PIPE, stdout=PIPE
-    )
-    stdout, _ = await proc.communicate(b"asdf")
-    print(f"stdout: '{stdout!r}'")
+# async def test_shell():
+#     proc = await create_subprocess_shell(
+#         "tee", stdin=PIPE, stdout=PIPE
+#     )
+#     stdout, _ = await proc.communicate(b"asdf")
+#     print(f"stdout: '{stdout!r}'")
 
 
 if __name__ == "__main__":

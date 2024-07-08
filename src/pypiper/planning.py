@@ -62,7 +62,7 @@ class PortSpec(GenCol[Port]):
         """
 
         conns = self.map(Connection, receivers)
-        return conns.sequence + list(conns.named.values())
+        return list(conns.values())
 
 
 class PlanningAgent:
@@ -235,7 +235,7 @@ class PlanningGraph(PlanningAgent):
     @property
     def output_ports(self) -> PortSpec:
         """External output ports."""
-        return self._input_ports
+        return self._output_ports
 
     def _create_stream_futures(
         self,
@@ -278,7 +278,7 @@ class PlanningGraph(PlanningAgent):
         input_futures: GenCol[Future[AsyncIterable]],
         output_futures: GenCol[Future[AsyncIterable]],
     ):
-        await wait(input_futures.values())
+        await wait(list(input_futures.values()))
         input_streams = input_futures.map(Future.result)
 
         output_streams = await actor.instantiate(input_streams)
