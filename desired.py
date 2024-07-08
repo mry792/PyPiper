@@ -4,7 +4,7 @@ from asyncio.subprocess import PIPE
 from typing import AsyncGenerator, Iterable, TypeVar
 
 from pypiper.algorithm import Filter, Map, Sort
-from pypiper.core import Pipeline
+from pypiper.planning import PlanningGraph
 from pypiper.subprocess import Shell
 
 T = TypeVar("T")
@@ -25,7 +25,7 @@ async def main():
     #     foreach(str.upper)
     # )
 
-    pipeline: Pipeline[str, str] = (
+    pipeline: PlanningGraph = (
         Filter[str](lambda x: x.startswith("x"))
         # | Shell.str("sed -e 's/d/_/g'")
         | Shell.str(cmd="tr 'd' '_'")
@@ -33,7 +33,7 @@ async def main():
         | Sort()
     )
 
-    async for x in pipeline(
+    async for x in await pipeline(
         ["asdf", "xasdf", "xqwer", "qwer", "xghjkl"]
     ):
         print(x)

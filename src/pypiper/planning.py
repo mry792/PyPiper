@@ -106,14 +106,17 @@ class PlanningAgent:
         self,
         *iterables: Iterable | AsyncIterable,
         **named_iterables: Iterable | AsyncIterable,
-    ) -> GenCol[AsyncIterable] | AsyncIterable:
+    ) -> AsyncIterable:
         """Create the computation graph using the given inputs."""
-        return await self.instantiate(
+
+        output_streams = await self.instantiate(
             GenCol(
                 list(iterables),
                 named_iterables,
             ).map(_ensure_async),
         )
+        output_streams.require_single_key()
+        return output_streams.sequence[0]
 
 
 def connect(
@@ -278,7 +281,7 @@ class PlanningGraph(PlanningAgent):
         await wait(input_futures.values())
         input_streams = input_futures.map(Future.result)
 
-        output_streams = await input_streams.invoke(actor.instantiate)
+        output_streams = await actor.instantiate(input_streams)
         if isinstance(output_streams, AsyncIterable):
             output_streams = GenCol(sequence=[output_streams])
 
@@ -286,9 +289,8 @@ class PlanningGraph(PlanningAgent):
 
     async def instantiate(
         self,
-        *iterables: AsyncIterable,
-        **named_iterables: AsyncIterable,
-    ) -> AsyncIterable | GenCol[AsyncIterable]:
+        input_streams: GenCol[AsyncIterable],
+    ) -> GenCol[AsyncIterable]:
         """Create the computation graph using the given inputs."""
 
         loop = get_running_loop()
@@ -300,10 +302,7 @@ class PlanningGraph(PlanningAgent):
             fut.set_result(it)
             return fut
 
-        input_futures = GenCol(
-            list(iterables),
-            named_iterables,
-        ).map(populate_future)
+        input_futures = input_streams.map(populate_future)
         output_futures = self.output_ports.map(
             lambda _: loop.create_future(),
         )

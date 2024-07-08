@@ -13,8 +13,8 @@ from asyncio.subprocess import PIPE, Process
 from collections.abc import AsyncGenerator, AsyncIterable, Coroutine
 from logging import getLogger
 
-from pypiper.algorithm import Map
-from pypiper.core import Pipeline, TaskTemplate
+from pypiper.algorithm import LinearActor, Map
+from pypiper.planning import PlanningGraph
 
 logger = getLogger(__name__)
 
@@ -39,7 +39,7 @@ async def iterable_to_stream(
     await ostream.wait_closed()
 
 
-class SubprocessBase(TaskTemplate[bytes, bytes]):
+class SubprocessBase(LinearActor[bytes, bytes]):
     """Base class for asynchronously running a subprocess."""
 
     def _create_subprocess(self) -> Coroutine[None, None, Process]:
@@ -102,7 +102,7 @@ class SubprocessBase(TaskTemplate[bytes, bytes]):
         # logger.debug("Shell: (done)")
 
     @classmethod
-    def str(cls, *args, **kwargs) -> Pipeline[str, str]:
+    def str(cls, *args, **kwargs) -> PlanningGraph:
         """
         Create a new `Subprocess` task template operating on strings.
 

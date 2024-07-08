@@ -1,5 +1,5 @@
 entrypoint = "run_tests.py"
-modules = ["python-3.10:v18-20230807-322e88b"]
+modules = ["python-3.10"]
 
 [nix]
 channel = "stable-23_05"
@@ -11,5 +11,5 @@ language = "python3"
 requiredFiles = [".replit", "replit.nix"]
 
 [deployment]
-run = "pytest --mypy ."
+run = "pytest --black --mypy --ruff"
 deploymentTarget = "cloudrun"

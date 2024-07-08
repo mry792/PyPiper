@@ -13,11 +13,35 @@ from collections.abc import (
     AsyncIterator,
     Callable,
 )
+from typing import Generic, TypeVar
 
-from pypiper.core import TaskTemplate, TInput, TOutput
+from pypiper.planning import Actor
+from pypiper.utils import GenCol
+
+T = TypeVar("T")
+TInput = TypeVar("TInput")
+TOutput = TypeVar("TOutput")
 
 
-class Map(TaskTemplate[TInput, TOutput]):
+class LinearActor(Generic[TInput, TOutput], Actor):
+    """Simple actor with a single input and a single output."""
+
+    def _run(
+        self,
+        iterable: AsyncIterable[TInput],
+    ) -> AsyncGenerator[TOutput, None]:
+        raise NotImplementedError()
+
+    async def instantiate(
+        self,
+        input_streams: GenCol[AsyncIterable],
+    ) -> GenCol[AsyncIterable]:
+        """Create the computation graph using the given inputs."""
+        input_streams.require_single_key()
+        return input_streams.map(self._run)
+
+
+class Map(LinearActor[TInput, TOutput]):
     """Asyncronously map a function over an iterable."""
 
     def __init__(self, op: Callable[[TInput], TOutput]):
@@ -50,7 +74,7 @@ class Map(TaskTemplate[TInput, TOutput]):
             yield op(item)
 
 
-class Filter(TaskTemplate[TInput, TInput]):
+class Filter(LinearActor[TInput, TInput]):
     """Asyncronously filter an iterable."""
 
     def __init__(self, predicate: Callable[[TInput], bool]):
@@ -86,7 +110,7 @@ class Filter(TaskTemplate[TInput, TInput]):
             #     print(f"Filter: (drop) '{item}'")
 
 
-class Sort(TaskTemplate[TInput, TInput]):
+class Sort(LinearActor[TInput, TInput]):
     """
     Syncronously sort an asynchronous iterable.
 

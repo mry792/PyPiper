@@ -25,6 +25,14 @@ class DuplicateKeysError(ValueError):
         super().__init__("Named keys must be unique.")
 
 
+class NonSoloKeyError(ValueError):
+    """Exception indicating that a GenCol has more than one key."""
+
+    def __init__(self):
+        """Initialize the exception."""
+        super().__init__("This GenCol must have a single key.")
+
+
 @dataclass
 class GenCol(Generic[T]):
     """A generalized collection of sequenced and named values."""
@@ -69,6 +77,11 @@ class GenCol(Generic[T]):
         if set(self.named.keys()) != set(other.named.keys()):
             return False
         return True
+
+    def require_single_key(self) -> None:
+        """Raise an exception if this GenCol has more than one key."""
+        if len(self.sequence) != 1 or self.named:
+            raise NonSoloKeyError()
 
     def keys(self) -> Generator[int | str, None, None]:
         """Iterate over the keys of this collection."""
