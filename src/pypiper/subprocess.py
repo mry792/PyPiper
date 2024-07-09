@@ -14,7 +14,7 @@ from collections.abc import AsyncGenerator, AsyncIterable, Coroutine
 from logging import getLogger
 
 from pypiper.algorithm import LinearActor, Map
-from pypiper.planning import PlanningGraph
+from pypiper.planning import GraphAgent
 
 logger = getLogger(__name__)
 
@@ -102,7 +102,7 @@ class SubprocessBase(LinearActor[bytes, bytes]):
         # logger.debug("Shell: (done)")
 
     @classmethod
-    def str(cls, *args, **kwargs) -> PlanningGraph:
+    def str(cls, *args, **kwargs) -> GraphAgent:
         """
         Create a new `Subprocess` task template operating on strings.
 

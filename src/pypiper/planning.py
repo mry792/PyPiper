@@ -91,7 +91,7 @@ class PlanningAgent:
     def __or__(
         self,
         downstream: "PlanningAgent",
-    ) -> "PlanningGraph":
+    ) -> "GraphAgent":
         """Connect this agent to the `downstream` agent."""
         return connect(self, downstream)
 
@@ -122,7 +122,7 @@ class PlanningAgent:
 def connect(
     sender: PlanningAgent,
     receiver: PlanningAgent,
-) -> "PlanningGraph":
+) -> "GraphAgent":
     """
     Connect the `sender` to the `receiver`.
 
@@ -135,7 +135,7 @@ def connect(
         or a single actor.
     """
 
-    return PlanningGraph(
+    return GraphAgent(
         tuple(chain(sender.actors, receiver.actors)),
         tuple(
             chain(
@@ -149,7 +149,7 @@ def connect(
     )
 
 
-def bundle(*channels: PlanningAgent) -> "PlanningGraph":
+def bundle(*channels: PlanningAgent) -> "GraphAgent":
     """
     Group disconnected subgraphs together as a single graph.
 
@@ -162,7 +162,7 @@ def bundle(*channels: PlanningAgent) -> "PlanningGraph":
     def get_members(name: str) -> Iterable:
         return (getattr(x, name) for x in channels)
 
-    return PlanningGraph(
+    return GraphAgent(
         chain.from_iterable(get_members("actors")),
         chain.from_iterable(get_members("connections")),
         PortSpec.merge(*get_members("input_ports")),
@@ -200,7 +200,7 @@ class Actor(PlanningAgent):
         return PortSpec([Port(self, 0)])
 
 
-class PlanningGraph(PlanningAgent):
+class GraphAgent(PlanningAgent):
     """."""
 
     def __init__(
