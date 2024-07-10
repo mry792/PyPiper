@@ -65,8 +65,8 @@ class PortSpec(GenCol[Port]):
         return list(conns.values())
 
 
-class PlanningAgent:
-    """Protocol identifying actors and graphs."""
+class Component:
+    """Protocol identifying reusable operations."""
 
     @property
     def actors(self) -> "tuple[Actor, ...]":
@@ -90,7 +90,7 @@ class PlanningAgent:
 
     def __or__(
         self,
-        downstream: "PlanningAgent",
+        downstream: "Component",
     ) -> "GraphAgent":
         """Connect this agent to the `downstream` agent."""
         return connect(self, downstream)
@@ -120,8 +120,8 @@ class PlanningAgent:
 
 
 def connect(
-    sender: PlanningAgent,
-    receiver: PlanningAgent,
+    sender: Component,
+    receiver: Component,
 ) -> "GraphAgent":
     """
     Connect the `sender` to the `receiver`.
@@ -129,9 +129,9 @@ def connect(
     The `sender`'s output ports must match the `receiver`'s input
     ports.
 
-    :param sender: The upstream planning agent. Could be a graph or a
+    :param sender: The upstream component. Could be a graph or a
         single actor.
-    :param receiver: The downstream planning agent. Could be a graph
+    :param receiver: The downstream component. Could be a graph
         or a single actor.
     """
 
@@ -149,13 +149,13 @@ def connect(
     )
 
 
-def bundle(*channels: PlanningAgent) -> "GraphAgent":
+def bundle(*channels: Component) -> "GraphAgent":
     """
-    Group disconnected subgraphs together as a single graph.
+    Group disconnected subnets together as a single graph.
 
     This does not create any new connections.
 
-    :param channels: The subgraphs to group together.
+    :param channels: The subnets to group together.
     :return: A new planning graph.
     """
 
@@ -170,9 +170,9 @@ def bundle(*channels: PlanningAgent) -> "GraphAgent":
     )
 
 
-class Actor(PlanningAgent):
+class Actor(Component):
     """
-    Planning agent for an individual operation.
+    Component for an individual operation.
 
     Derived classes must implement the `instantiate` method. They
     could also optionally overide the `input_ports` and `output_ports`
@@ -200,7 +200,7 @@ class Actor(PlanningAgent):
         return PortSpec([Port(self, 0)])
 
 
-class GraphAgent(PlanningAgent):
+class GraphAgent(Component):
     """."""
 
     def __init__(
