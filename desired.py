@@ -4,7 +4,7 @@ from asyncio.subprocess import PIPE
 from typing import AsyncGenerator, Iterable, TypeVar
 
 from pypiper.algorithm import Filter, Map, Sort
-from pypiper.planning import GraphAgent
+from pypiper.planning import Network
 from pypiper.subprocess import Shell
 
 T = TypeVar("T")
@@ -25,7 +25,7 @@ async def main():
     #     foreach(str.upper)
     # )
 
-    pipeline: GraphAgent = (
+    pipeline: Network = (
         Filter[str](lambda x: x.startswith("x"))
         # | Shell.str("sed -e 's/d/_/g'")
         | Shell.str(cmd="tr 'd' '_'")

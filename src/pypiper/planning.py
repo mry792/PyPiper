@@ -91,7 +91,7 @@ class Component:
     def __or__(
         self,
         downstream: "Component",
-    ) -> "GraphAgent":
+    ) -> "Network":
         """Connect this agent to the `downstream` agent."""
         return connect(self, downstream)
 
@@ -122,20 +122,20 @@ class Component:
 def connect(
     sender: Component,
     receiver: Component,
-) -> "GraphAgent":
+) -> "Network":
     """
     Connect the `sender` to the `receiver`.
 
     The `sender`'s output ports must match the `receiver`'s input
     ports.
 
-    :param sender: The upstream component. Could be a graph or a
+    :param sender: The upstream component. Could be a network or a
         single actor.
-    :param receiver: The downstream component. Could be a graph
+    :param receiver: The downstream component. Could be a network
         or a single actor.
     """
 
-    return GraphAgent(
+    return Network(
         tuple(chain(sender.actors, receiver.actors)),
         tuple(
             chain(
@@ -149,20 +149,20 @@ def connect(
     )
 
 
-def bundle(*channels: Component) -> "GraphAgent":
+def bundle(*channels: Component) -> "Network":
     """
-    Group disconnected subnets together as a single graph.
+    Group disconnected subnets together as a single network.
 
     This does not create any new connections.
 
     :param channels: The subnets to group together.
-    :return: A new planning graph.
+    :return: A new network.
     """
 
     def get_members(name: str) -> Iterable:
         return (getattr(x, name) for x in channels)
 
-    return GraphAgent(
+    return Network(
         chain.from_iterable(get_members("actors")),
         chain.from_iterable(get_members("connections")),
         PortSpec.merge(*get_members("input_ports")),
@@ -200,7 +200,7 @@ class Actor(Component):
         return PortSpec([Port(self, 0)])
 
 
-class GraphAgent(Component):
+class Network(Component):
     """."""
 
     def __init__(
@@ -219,12 +219,12 @@ class GraphAgent(Component):
 
     @property
     def actors(self) -> tuple[Actor, ...]:
-        """Internal actors of this graph."""
+        """Internal actors of this network."""
         return self._actors
 
     @property
     def connections(self) -> tuple[Connection, ...]:
-        """Internal connections of this planning graph."""
+        """Internal connections of this network."""
         return self._connections
 
     @property
