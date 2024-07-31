@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from itertools import chain
 from typing import Generic, TypeVar
 
+from anyio import create_task_group
+
 T = TypeVar("T")
 TGenCol = TypeVar("TGenCol", bound="GenCol")
 
@@ -31,6 +33,22 @@ class NonSoloKeyError(ValueError):
     def __init__(self):
         """Initialize the exception."""
         super().__init__("This GenCol must have a single key.")
+
+
+class StructuralMissmatchError(ValueError):
+    """Exception thrown when two GenCols have different structures."""
+
+    def __init__(self, a: "GenCol", b: "GenCol"):
+        """Initialize the exception."""
+
+        a_keys = list(a.named.keys())
+        b_keys = list(b.named.keys())
+        super().__init__(
+            "Expected two GenCol objects to have the same structure. "
+            "Found:\n"
+            f"  - {{seq: {len(a.sequence)}, names: {a_keys}}}\n"
+            f"  - {{seq: {len(b.sequence)}, names: {b_keys}}}",
+        )
 
 
 @dataclass
@@ -63,6 +81,10 @@ class GenCol(Generic[T]):
             named=named,
         )
 
+    def is_empty(self) -> bool:
+        """Return `True` if this GenCol is empty."""
+        return len(self.sequence) == 0 and len(self.named) == 0
+
     def get(self, key: int | str) -> T:
         """Lookup by arbitrary key."""
         if isinstance(key, str):
@@ -78,10 +100,16 @@ class GenCol(Generic[T]):
             return False
         return True
 
-    def require_single_key(self) -> None:
+    def require_single_key(self) -> T:
         """Raise an exception if this GenCol has more than one key."""
-        if len(self.sequence) != 1 or self.named:
-            raise NonSoloKeyError()
+
+        if len(self.sequence) == 1 and not self.named:
+            return self.sequence[0]
+
+        if not self.sequence and len(self.named) == 1:
+            return next(iter(self.named.values()))
+
+        raise NonSoloKeyError()
 
     def keys(self) -> Generator[int | str, None, None]:
         """Iterate over the keys of this collection."""
@@ -128,16 +156,16 @@ class GenCol(Generic[T]):
 
         for arg in args:
             if not arg.is_structural_match(self):
-                raise ValueError()
+                raise StructuralMissmatchError(self, arg)
 
-        other_sequence = [s.sequence for s in args]
+        other_sequences = [s.sequence for s in args]
 
         return GenCol(
             sequence=[
                 func(*params)
                 for params in zip(
                     self.sequence,
-                    *other_sequence,
+                    *other_sequences,
                     strict=True,
                 )
             ],
@@ -146,6 +174,50 @@ class GenCol(Generic[T]):
                 for key, value in self.named.items()
             },
         )
+
+    async def amap(self, func: Callable, *args: "GenCol") -> "GenCol":
+        """
+        Asyncronously apply `func` to each element returning a new `GenCol`.
+
+        This is the "fmap" of the "Functor" concept.
+
+        :param func: The function to apply.
+        :param args: Extra arguments to pass to `func`. Must be other
+            `GenCol`s with matching structure.
+
+        :return: A new `GenCol` with the same structure containing the
+            results of the operations.
+        """
+
+        for arg in args:
+            if not arg.is_structural_match(self):
+                raise ValueError()
+
+        other_sequences = [s.sequence for s in args]
+
+        result = {}
+
+        async def exec_func(key, args):
+            result[key] = await func(*args)
+
+        async with create_task_group() as tg:
+            for idx, params in enumerate(
+                zip(
+                    self.sequence,
+                    *other_sequences,
+                    strict=True,
+                ),
+            ):
+                tg.start_soon(exec_func, idx, params)
+
+            for key, value in self.named.items():
+                tg.start_soon(
+                    exec_func,
+                    key,
+                    (value, *(a.named[key] for a in args)),
+                )
+
+        return GenCol.assemble(result)
 
     def zip(self, *args: "GenCol") -> Generator:
         """
@@ -182,6 +254,19 @@ class GenCol(Generic[T]):
 
         for params in self.zip(*args):
             func(*params)
+
+    async def aforeach(self, func: Callable, *args: "GenCol"):
+        """
+        Apply `func` to each element.
+
+        :param func: The function to apply.
+        :param args: Extra arguments to pass to `func`. Must be other
+            `GenCol`s with matching structure.
+        """
+
+        async with create_task_group() as tg:
+            for params in self.zip(*args):
+                tg.start_soon(func, *params)
 
     @classmethod
     def merge(

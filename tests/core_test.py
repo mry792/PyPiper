@@ -1,27 +1,57 @@
-from collections.abc import AsyncGenerator, AsyncIterable
+from collections.abc import AsyncGenerator
 from itertools import product
 
 import pytest
+from anyio.streams.memory import (
+    MemoryObjectReceiveStream,
+    MemoryObjectSendStream,
+)
 
-from pypiper.core import Pipeline, TaskTemplate
+from pypiper.planning import Actor, Network, connect
+from pypiper.utils import GenCol
 
 
-class Times10(TaskTemplate[int, int]):
-    async def _run(
+class Times10(Actor):
+    async def exec(
         self,
-        iterable: AsyncIterable[int],
-    ) -> AsyncGenerator[int, None]:
-        async for item in iterable:
-            yield item * 10
+        input_streams: GenCol[MemoryObjectReceiveStream[int]],
+        output_streams: GenCol[MemoryObjectSendStream[int]],
+    ):
+        """Create the computation process."""
+
+        self._validate_streams(input_streams, output_streams)
+
+        in_ = input_streams.sequence[0]
+        out = output_streams.sequence[0]
+
+        async with in_, out:
+            async for item in in_:
+                await out.send(item * 10)
+
+    # async def _run(
+    #     self,
+    #     iterable: AsyncIterable[int],
+    # ) -> AsyncGenerator[int, None]:
+    #     async for item in iterable:
+    #         yield item * 10
 
 
-class Add1(TaskTemplate[int, int]):
-    async def _run(
+class Add1(Actor):
+    async def exec(
         self,
-        iterable: AsyncIterable[int],
-    ) -> AsyncGenerator[int, None]:
-        async for item in iterable:
-            yield item + 1
+        input_streams: GenCol[MemoryObjectReceiveStream[int]],
+        output_streams: GenCol[MemoryObjectSendStream[int]],
+    ):
+        """Create the computation process."""
+
+        self._validate_streams(input_streams, output_streams)
+
+        in_ = input_streams.sequence[0]
+        out = output_streams.sequence[0]
+
+        async with in_, out:
+            async for item in in_:
+                await out.send(item + 1)
 
 
 @pytest.fixture()
@@ -34,84 +64,94 @@ def agen_1_2_3() -> AsyncGenerator[int, None]:
     return _gen()
 
 
-class TestTaskTemplate:
-    def test_tasks(self):
-        task: TaskTemplate = TaskTemplate()
-        assert task.tasks() == (task,)
+class TestActor:
+    def test_actors(self):
+        actor: Actor = Actor()
+        assert actor.actors == (actor,)
 
     def test_pipe(self):
-        task_1: TaskTemplate = TaskTemplate()
-        task_2: TaskTemplate = TaskTemplate()
+        actor_1: Actor = Actor()
+        actor_2: Actor = Actor()
 
-        pipeline = task_1 | task_2
+        network = actor_1 | actor_2
 
-        assert isinstance(pipeline, Pipeline)
-        assert pipeline.tasks() == (task_1, task_2)
+        assert isinstance(network, Network)
+        assert network.actors == (actor_1, actor_2)
 
     @pytest.mark.asyncio()
     async def test_call_iterable(self):
-        result = [item async for item in Times10()([1, 2, 3])]
+        result = [item async for item in Times10().run([1, 2, 3])]
         assert result == [10, 20, 30]
 
     @pytest.mark.asyncio()
     async def test_call_async_iterable(self, agen_1_2_3):
-        result = [item async for item in Add1()(agen_1_2_3)]
+        result = [item async for item in Add1().run(agen_1_2_3)]
         assert result == [2, 3, 4]
 
 
-TASK_LISTS: tuple[tuple[TaskTemplate, ...], ...] = (
-    (),
-    (TaskTemplate(),),
-    (TaskTemplate(), TaskTemplate(), TaskTemplate()),
+ACTOR_LISTS: tuple[tuple[Actor, ...], ...] = (
+    # (),
+    (Actor(),),
+    # (Actor(), Actor(), Actor()),
 )
 
 
-class TestPipeline:
+# TODO: test connect and bundle
+
+
+class TestNetwork:
     @pytest.mark.parametrize(
-        ("lhs_task", "rhs_tasks"),
-        product((TaskTemplate(),), TASK_LISTS),
+        ("lhs_actor", "rhs_actors"),
+        product((Actor(),), ACTOR_LISTS),
     )
-    def test_pipe_task_pipeline(self, lhs_task, rhs_tasks):
-        pipeline = lhs_task | Pipeline(*rhs_tasks)
+    def test_pipe_actor_network(self, lhs_actor, rhs_actors):
+        network = lhs_actor | connect(*rhs_actors)
 
-        assert isinstance(pipeline, Pipeline)
-        assert pipeline.tasks() == (lhs_task, *rhs_tasks)
-
-    @pytest.mark.parametrize(
-        ("lhs_tasks", "rhs_task"),
-        product(TASK_LISTS, (TaskTemplate(),)),
-    )
-    def test_pipe_pipeline_task(self, lhs_tasks, rhs_task):
-        pipeline = Pipeline(*lhs_tasks) | rhs_task
-
-        assert isinstance(pipeline, Pipeline)
-        assert pipeline.tasks() == (*lhs_tasks, rhs_task)
+        assert isinstance(network, Network)
+        assert network.actors == (lhs_actor, *rhs_actors)
+        # TODO: assert other properties
 
     @pytest.mark.parametrize(
-        ("lhs_tasks", "rhs_tasks"),
-        product(TASK_LISTS, TASK_LISTS),
+        ("lhs_actors", "rhs_actor"),
+        product(ACTOR_LISTS, (Actor(),)),
     )
-    def test_pipe_pipeline_pipeline(self, lhs_tasks, rhs_tasks):
-        lhs: Pipeline = Pipeline(*lhs_tasks)
-        rhs: Pipeline = Pipeline(*rhs_tasks)
-        pipeline: Pipeline = lhs | rhs
+    def test_pipe_network_actor(self, lhs_actors, rhs_actor):
+        network = connect(*lhs_actors) | rhs_actor
 
-        assert isinstance(pipeline, Pipeline)
-        assert pipeline.tasks() == (*lhs_tasks, *rhs_tasks)
+        assert isinstance(network, Network)
+        assert network.actors == (*lhs_actors, rhs_actor)
+        # TODO: assert other properties
+
+    @pytest.mark.parametrize(
+        ("lhs_actors", "rhs_actors"),
+        product(ACTOR_LISTS, ACTOR_LISTS),
+    )
+    def test_pipe_network_network(self, lhs_actors, rhs_actors):
+        lhs = connect(*lhs_actors)
+        rhs = connect(*rhs_actors)
+        network = lhs | rhs
+
+        assert isinstance(network, Network)
+        assert network.actors == (*lhs_actors, *rhs_actors)
+        # TODO: assert other properties
 
     @pytest.mark.asyncio()
     @pytest.mark.parametrize(
-        ("tasks", "expected"),
+        ("actors", "data", "expected"),
         [
-            ((), [1, 2, 3]),
-            ((Times10(),), [10, 20, 30]),
+            (
+                (Times10(),),
+                (1, 2, 3),
+                [10, 20, 30],
+            ),
             (
                 (Add1(), Times10(), Add1()),
+                [1, 2, 3],
                 [21, 31, 41],
             ),
         ],
     )
-    async def test_call_iterable(self, tasks, expected):
-        pipeline: Pipeline[int, int] = Pipeline(*tasks)
-        result = [item async for item in pipeline([1, 2, 3])]
+    async def test_run_iterable(self, actors, data, expected):
+        network = connect(*actors)
+        result = [item async for item in network.run(data)]
         assert result == expected

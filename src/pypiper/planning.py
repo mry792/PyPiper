@@ -1,30 +1,25 @@
 """."""
 
-from asyncio import Future, Task, get_running_loop, wait
-from collections import defaultdict
 from collections.abc import AsyncGenerator, AsyncIterable, Iterable
 from dataclasses import dataclass
-from itertools import chain
-from typing import TypeVar
+from functools import partial
+from itertools import chain, pairwise
+from logging import getLogger
+from typing import Protocol
 
-from pypiper.utils import GenCol
+from anyio import create_memory_object_stream, create_task_group
+from anyio.streams.memory import (
+    MemoryObjectReceiveStream,
+    MemoryObjectSendStream,
+)
 
-T = TypeVar("T")
+from pypiper.utils import (
+    GenCol,
+    StructuralMissmatchError,
+    iter_to_stream,
+)
 
-
-async def _wrap_async(
-    iterable: Iterable[T],
-) -> AsyncGenerator[T, None]:
-    for item in iterable:
-        yield item
-
-
-def _ensure_async(
-    iterable: Iterable[T] | AsyncIterable[T],
-) -> AsyncIterable[T]:
-    if isinstance(iterable, AsyncIterable):
-        return iterable
-    return _wrap_async(iterable)
+logger = getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -62,10 +57,11 @@ class PortSpec(GenCol[Port]):
         """
 
         conns = self.map(Connection, receivers)
+        # print(f"conns: {conns}")
         return list(conns.values())
 
 
-class Component:
+class Component(Protocol):
     """Protocol identifying reusable operations."""
 
     @property
@@ -88,85 +84,141 @@ class Component:
         """External output ports."""
         return PortSpec()
 
-    def __or__(
+    async def exec(
         self,
-        downstream: "Component",
-    ) -> "Network":
-        """Connect this agent to the `downstream` agent."""
-        return connect(self, downstream)
-
-    async def instantiate(
-        self,
-        input_streams: GenCol[AsyncIterable],
-    ) -> GenCol[AsyncIterable]:
-        """Create the computation graph using the given inputs."""
+        input_streams: GenCol[MemoryObjectReceiveStream],
+        output_streams: GenCol[MemoryObjectSendStream],
+    ):
+        """Execute the computation process(es)."""
         raise NotImplementedError()
 
-    async def __call__(
+    def _validate_streams(
         self,
-        *iterables: Iterable | AsyncIterable,
-        **named_iterables: Iterable | AsyncIterable,
-    ) -> AsyncIterable:
-        """Create the computation graph using the given inputs."""
+        input_streams: GenCol,
+        output_streams: GenCol,
+    ):
+        if not self.input_ports.is_structural_match(input_streams):
+            raise StructuralMissmatchError(
+                self.input_ports,
+                input_streams,
+            )
+        if not self.output_ports.is_structural_match(output_streams):
+            raise StructuralMissmatchError(
+                self.output_ports,
+                output_streams,
+            )
 
-        output_streams = await self.instantiate(
-            GenCol(
-                list(iterables),
-                named_iterables,
-            ).map(_ensure_async),
-        )
-        output_streams.require_single_key()
-        return output_streams.sequence[0]
+    async def run(
+        self,
+        input_iters: (
+            GenCol[Iterable | AsyncIterable]
+            | Iterable
+            | AsyncIterable
+            | None
+        ) = None,
+    ) -> AsyncGenerator:
+        """
+        Execute the component with the given input iterables.
+
+        :param input_iters: The input iterables.
+        """
+
+        if input_iters is None:
+            input_iters = GenCol()
+        elif isinstance(input_iters, Iterable | AsyncIterable):
+            input_iters = GenCol([input_iters])
+        elif not isinstance(input_iters, GenCol):
+            raise TypeError()
+
+        async with create_task_group() as tg:
+            input_streams: GenCol[MemoryObjectReceiveStream] = (
+                input_iters.map(
+                    partial(iter_to_stream, tg),
+                )
+            )
+
+            if self.output_ports.is_structural_match(PortSpec()):
+                output_streams: GenCol[MemoryObjectSendStream] = (
+                    GenCol()
+                )
+                recv = None
+            else:
+                send, recv = create_memory_object_stream()
+                output_streams: GenCol[MemoryObjectSendStream] = (
+                    GenCol([send])
+                )
+
+            tg.start_soon(
+                self.exec,
+                input_streams,
+                output_streams,
+            )
+
+            if recv is not None:
+                async for item in recv:
+                    yield item
 
 
-def connect(
-    sender: Component,
-    receiver: Component,
-) -> "Network":
+def connect(*components: Component) -> "Network":
     """
-    Connect the `sender` to the `receiver`.
+    Connect the given components serially into a new network.
 
-    The `sender`'s output ports must match the `receiver`'s input
-    ports.
+    Each sender's output ports must match the receiver's input ports.
 
-    :param sender: The upstream component. Could be a network or a
-        single actor.
-    :param receiver: The downstream component. Could be a network
-        or a single actor.
+    :param components: The components to connect in serial.
+    :return: The resulting network.
     """
+
+    if not components:
+        return Network((), (), PortSpec(), PortSpec())
+
+    connections = list(components[0].connections)
+    for sender, receiver in pairwise(components):
+        new_conns = sender.output_ports.send_to(receiver.input_ports)
+        connections.extend(new_conns)
+        connections.extend(receiver.connections)
 
     return Network(
-        tuple(chain(sender.actors, receiver.actors)),
-        tuple(
-            chain(
-                sender.connections,
-                sender.output_ports.send_to(receiver.input_ports),
-                receiver.connections,
+        actors=tuple(
+            chain.from_iterable(
+                component.actors for component in components
             ),
         ),
-        sender.input_ports,
-        receiver.output_ports,
+        connections=tuple(connections),
+        input_ports=components[0].input_ports,
+        output_ports=components[-1].output_ports,
     )
 
 
-def bundle(*channels: Component) -> "Network":
+def bundle(*components: Component) -> "Network":
     """
-    Group disconnected subnets together as a single network.
+    Connect the given `components` together in parallel.
 
-    This does not create any new connections.
+    All the input ports will be concatenated and named ports must
+    have unique names. Same for all the output ports.
 
-    :param channels: The subnets to group together.
-    :return: A new network.
+    :param components: The components to connect.
+
+    :raises DuplicateKeysError: If the ports have duplicate names.
+    :return: A single flattened network.
     """
 
-    def get_members(name: str) -> Iterable:
-        return (getattr(x, name) for x in channels)
+    actors = []
+    connections = []
+    input_portspecs = []
+    output_portspecs = []
+
+    for component in components:
+        actors.extend(component.actors)
+        connections.extend(component.connections)
+        input_portspecs.append(component.input_ports)
+        output_portspecs.append(component.output_ports)
 
     return Network(
-        chain.from_iterable(get_members("actors")),
-        chain.from_iterable(get_members("connections")),
-        PortSpec.merge(*get_members("input_ports")),
-        PortSpec.merge(*get_members("output_ports")),
+        actors=tuple(actors),
+        connections=tuple(connections),
+        input_ports=PortSpec.merge(*input_portspecs),
+        output_ports=PortSpec.merge(*output_portspecs),
     )
 
 
@@ -174,8 +226,8 @@ class Actor(Component):
     """
     Component for an individual operation.
 
-    Derived classes must implement the `instantiate` method. They
-    could also optionally overide the `input_ports` and `output_ports`
+    Derived classes must implement the `exec` method. They could also
+    optionally overide the `input_ports` and `output_ports`
     properties.
     """
 
@@ -199,21 +251,33 @@ class Actor(Component):
         """By default, actors have a single unnamed output port."""
         return PortSpec([Port(self, 0)])
 
+    async def exec(
+        self,
+        input_streams: GenCol[MemoryObjectReceiveStream],
+        output_streams: GenCol[MemoryObjectSendStream],
+    ):
+        """Execute the computation process(es)."""
+        raise NotImplementedError()
+
+    def __or__(self, downstream: Component) -> "Network":
+        """Connect this component to the `downstream` component."""
+        return connect(self, downstream)
+
 
 class Network(Component):
-    """."""
+    """A directed graph of actors representing a computation plan."""
 
     def __init__(
         self,
-        actors: Iterable[Actor],
-        connections: Iterable[Connection],
+        actors: tuple[Actor, ...],
+        connections: tuple[Connection, ...],
         input_ports: PortSpec,
         output_ports: PortSpec,
     ):
         """Initialise with known, well behaved, fields."""
 
-        self._actors = tuple(actors)
-        self._connections = tuple(connections)
+        self._actors = actors
+        self._connections = connections
         self._input_ports = input_ports
         self._output_ports = output_ports
 
@@ -237,92 +301,74 @@ class Network(Component):
         """External output ports."""
         return self._output_ports
 
-    def _create_stream_futures(
+    def __or__(self, downstream: Component) -> "Network":
+        """Connect this component to the `downstream` component."""
+        return connect(self, downstream)
+
+    def _create_streams(
         self,
-        inputs: GenCol[Future[AsyncIterable]],
-        outputs: GenCol[Future[AsyncIterable]],
+        input_streams: GenCol[MemoryObjectReceiveStream],
+        output_streams: GenCol[MemoryObjectSendStream],
     ) -> tuple[
-        dict[Actor, dict[int | str, Future[AsyncIterable]]],
-        dict[Actor, dict[int | str, Future[AsyncIterable]]],
+        dict[Actor, GenCol[MemoryObjectSendStream]],
+        dict[Actor, GenCol[MemoryObjectReceiveStream]],
     ]:
-        loop = get_running_loop()
-
-        by_sender: dict[
+        send_streams: dict[
             Actor,
-            dict[int | str, Future[AsyncIterable]],
-        ] = defaultdict(dict)
-        by_reciever: dict[
+            dict[int | str, MemoryObjectSendStream],
+        ] = {actor: {} for actor in self.actors}
+        recv_streams: dict[
             Actor,
-            dict[int | str, Future[AsyncIterable]],
-        ] = defaultdict(dict)
+            dict[int | str, MemoryObjectReceiveStream],
+        ] = {actor: {} for actor in self.actors}
 
-        def add_sender(port: Port, future: Future[AsyncIterable]):
-            by_sender[port.actor][port.key] = future
+        def store(col):
+            def store_stream(port, stream):
+                col[port.actor][port.key] = stream
 
-        def add_receiver(port: Port, future: Future[AsyncIterable]):
-            by_reciever[port.actor][port.key] = future
+            return store_stream
 
-        self.input_ports.foreach(add_receiver, inputs)
-        self.output_ports.foreach(add_sender, outputs)
+        # print(f"input_streams: {input_streams}")
+        # print(f"output_streams: {output_streams}")
+        self.input_ports.foreach(store(recv_streams), input_streams)
+        self.output_ports.foreach(store(send_streams), output_streams)
 
         for conn in self.connections:
-            fut = loop.create_future()
-            add_sender(conn.sender, fut)
-            add_receiver(conn.receiver, fut)
+            send_stream, recv_stream = create_memory_object_stream()
+            sender, receiver = conn.sender, conn.receiver
+            send_streams[sender.actor][sender.key] = send_stream
+            recv_streams[receiver.actor][receiver.key] = recv_stream
 
-        return by_sender, by_reciever
+        return (
+            {
+                actor: GenCol.assemble(pairs)
+                for actor, pairs in send_streams.items()
+            },
+            {
+                actor: GenCol.assemble(pairs)
+                for actor, pairs in recv_streams.items()
+            },
+        )
 
-    @staticmethod
-    async def _init_actor(
-        actor: Actor,
-        input_futures: GenCol[Future[AsyncIterable]],
-        output_futures: GenCol[Future[AsyncIterable]],
-    ):
-        await wait(list(input_futures.values()))
-        input_streams = input_futures.map(Future.result)
-
-        output_streams = await actor.instantiate(input_streams)
-        if isinstance(output_streams, AsyncIterable):
-            output_streams = GenCol(sequence=[output_streams])
-
-        output_futures.foreach(Future.set_result, output_streams)
-
-    async def instantiate(
+    async def exec(
         self,
-        input_streams: GenCol[AsyncIterable],
-    ) -> GenCol[AsyncIterable]:
-        """Create the computation graph using the given inputs."""
+        input_streams: GenCol[MemoryObjectReceiveStream],
+        output_streams: GenCol[MemoryObjectSendStream],
+    ):
+        """Create the computation processes."""
 
-        loop = get_running_loop()
+        logger.info(f"Executing {self}")
+        self._validate_streams(input_streams, output_streams)
 
-        def populate_future(
-            it: AsyncIterable,
-        ) -> Future[AsyncIterable]:
-            fut = loop.create_future()
-            fut.set_result(it)
-            return fut
-
-        input_futures = input_streams.map(populate_future)
-        output_futures = self.output_ports.map(
-            lambda _: loop.create_future(),
+        send_streams, recv_streams = self._create_streams(
+            input_streams,
+            output_streams,
         )
 
-        by_sender, by_receiver = self._create_stream_futures(
-            input_futures,
-            output_futures,
-        )
-
-        init_actor_tasks: list[Task] = [
-            Task(
-                self._init_actor(
-                    actor,
-                    GenCol.assemble(by_receiver[actor]),
-                    GenCol.assemble(by_sender[actor]),
-                ),
-            )
-            for actor in self.actors
-        ]
-
-        await wait(init_actor_tasks)
-
-        return output_futures.map(Future.result)
+        async with create_task_group() as task_group:
+            for actor in self.actors:
+                task_group.start_soon(
+                    actor.exec,
+                    recv_streams[actor],
+                    send_streams[actor],
+                )

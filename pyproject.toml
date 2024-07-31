@@ -5,7 +5,7 @@ description = ""
 authors = ["M. Emery Goss <m.goss792@gmail.com>"]
 
 [tool.poetry.dependencies]
-python = ">=3.10.0,<3.12"
+python = ">=3.10.0,<3.13"
 git-python = "^1.0.3"
 piper = "^0.14.2"
 pytest = "^8.2.2"
@@ -20,6 +20,7 @@ pytest-mypy = "^0.10.3"
 pytest-ruff = "^0.3.2"
 ruff = "^0.4.5"
 pytest-asyncio = "^0.23.7"
+pyright = "^1.1.373"
 
 [tool.pytest.ini_options]
 addopts = ["--import-mode=importlib"]
@@ -35,7 +36,7 @@ ignore_missing_imports = true
 [tool.pyright]
 # # https://github.com/microsoft/pyright/blob/main/docs/configuration.md
 # useLibraryCodeForTypes = true
-exclude = ["*"]
+# exclude = ["**"]
 
 [tool.ruff]
 target-version = "py310"

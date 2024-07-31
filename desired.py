@@ -3,9 +3,9 @@ from asyncio import create_subprocess_shell, run
 from asyncio.subprocess import PIPE
 from typing import AsyncGenerator, Iterable, TypeVar
 
-from pypiper.algorithm import Filter, Map, Sort
+from pypiper.algorithm import Filter, Foreach, Map, Sort
 from pypiper.planning import Network
-from pypiper.subprocess import Shell
+from pypiper.subprocess import Exec
 
 T = TypeVar("T")
 
@@ -28,15 +28,18 @@ async def main():
     pipeline: Network = (
         Filter[str](lambda x: x.startswith("x"))
         # | Shell.str("sed -e 's/d/_/g'")
-        | Shell.str(cmd="tr 'd' '_'")
+        | Exec("tr 'd' '_'")
         | Map(str.upper)
         | Sort()
+        | Foreach(print)
     )
 
-    async for x in await pipeline(
-        ["asdf", "xasdf", "xqwer", "qwer", "xghjkl"]
-    ):
-        print(x)
+    (
+        _
+        async for _ in pipeline.run(
+            ["asdf", "xasdf", "xqwer", "qwer", "xghjkl"]
+        )
+    )
 
 
 # async def test_shell():

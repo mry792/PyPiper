@@ -1,172 +1,126 @@
-"""Task template types for subprocess."""
+"""Actors to manage subprocesses."""
 
-from asyncio import (
-    FIRST_COMPLETED,
-    StreamReader,
-    StreamWriter,
-    create_subprocess_exec,
-    create_subprocess_shell,
-    create_task,
-    wait,
-)
-from asyncio.subprocess import PIPE, Process
-from collections.abc import AsyncGenerator, AsyncIterable, Coroutine
+from collections.abc import Awaitable, Callable, Sequence
 from logging import getLogger
 
-from pypiper.algorithm import LinearActor, Map
-from pypiper.planning import Network
+from anyio import create_task_group, open_process
+from anyio.abc import ByteReceiveStream, ByteSendStream
+from anyio.streams.memory import (
+    MemoryObjectReceiveStream,
+    MemoryObjectSendStream,
+)
+
+from pypiper.planning import Actor
+from pypiper.utils import GenCol
 
 logger = getLogger(__name__)
 
 
-async def iterable_to_stream(
-    iterable: AsyncIterable[bytes],
-    ostream: StreamWriter,
-):
+class Exec(Actor):
     """
-    Asynchronously write the items of `iterable` to `ostream`.
+    Execute a command in a subprocess.
 
-    :param iterable: The iterable to pull data from.
-    :param ostream: The stream to write data to.
+    This actor will execute a command in a subprocess with the input
+    stream connected to the standard input of the subprocess and the
+    output stream connected to the standard output of the subprocess.
+    Both streams must transmit :py:class:`str` objects which will be
+    delineated by the configured `delim`.
     """
 
-    async for item in iterable:
-        # logger.debug(f"forward_to_stream: {item.decode()}")
-        ostream.write(item + b"\n")
-        await ostream.drain()
-    ostream.write_eof()
-    # ostream.close()
-    await ostream.wait_closed()
-
-
-class SubprocessBase(LinearActor[bytes, bytes]):
-    """Base class for asynchronously running a subprocess."""
-
-    def _create_subprocess(self) -> Coroutine[None, None, Process]:
-        """
-        Create the managed subprocess.
-
-        Derived classes must overide this as a coroutine to create the
-        managed :py:class:`asyncio.subprocess.Process` object. It must
-        be created with PIPEs for the stdin and stdout streams.
-        """
-
-        raise NotImplementedError()
-
-    async def _run(
+    def __init__(
         self,
-        iterable: AsyncIterable[bytes],
-    ) -> AsyncGenerator[bytes, None]:
+        cmd: str | Sequence[str],
+        delim: str = "\n",
+        stderr_delim: str | None = None,
+    ):
         """
-        Instantiate the task.
+        Initialize the actor with the subprocess configuration.
 
-        Create a new subprocess, write the items of `iterable` to it's
-        stdin stream, and yield the items of the subprocess's stdout
-        stream.
-
-        :param iterable: The iterable to process.
-
-        :return: An `AsyncGenerator` that processes `iterable`.
+        :param cmd: The command to execute.
+        :param delim: The delimiter to use to separate both input and
+            output items.
+        :param stderr_delim: The delimiter to use to separate output
+            lines from stderr. Defaults to same as `delim`.
         """
 
-        proc = await self._create_subprocess()
+        self._cmd = cmd
+        self._delim = delim
+        self._stderr_delim = stderr_delim or delim
 
-        handle_input = create_task(
-            iterable_to_stream(
-                iterable,
-                proc.stdin,  # type: ignore[arg-type]
-            ),
-        )
-        proc_out: StreamReader = proc.stdout  # type: ignore[assignment]
+    async def _handle_stdin(
+        self,
+        receive_stream: MemoryObjectReceiveStream[str],
+        proc_in: ByteSendStream,
+    ):
+        delim = self._delim
+        async with receive_stream, proc_in:
+            async for line in receive_stream:
+                await proc_in.send((line + delim).encode())
 
-        next_output = create_task(proc_out.readline())
-        pending = {handle_input, next_output}
+    @staticmethod
+    async def _handle_per_line(
+        delim: str,
+        receive_stream: ByteReceiveStream,
+        handle_line: Callable[[str], Awaitable[None]],
+    ):
+        async with receive_stream:
+            buffer = []
+            async for chunk in receive_stream:
+                lines = chunk.decode().split(delim)
+                for line in lines[:-1]:
+                    buffer.append(line)
+                    await handle_line("".join(buffer))
+                    buffer.clear()
+                buffer.append(lines[-1])
 
-        while pending:
-            # logger.debug(f"Shell: waiting - {nexts}")
-            done, pending = await wait(
-                pending,
-                return_when=FIRST_COMPLETED,
+            if buffer:
+                await handle_line("".join(buffer))
+
+    async def _handle_stdout(
+        self,
+        proc_out: ByteReceiveStream,
+        send_stream: MemoryObjectSendStream[str],
+    ):
+        async with send_stream:
+            await self._handle_per_line(
+                self._delim,
+                proc_out,
+                send_stream.send,
             )
 
-            if next_output.done():
-                output = await next_output
-                # logger.debug(f"Shell: {output!r}")
-                if output == b"":
-                    # logger.debug("Shell: (last)")
-                    break
-                else:
-                    yield output.rstrip(b"\r\n")
-                    next_output = create_task(proc_out.readline())
-                    pending.add(next_output)
-        # logger.debug("Shell: (done)")
+    async def _handle_stderr(
+        self,
+        proc_err: ByteReceiveStream,
+    ):
+        async def _alog(line: str):
+            logger.info(line)
 
-    @classmethod
-    def str(cls, *args, **kwargs) -> Network:
-        """
-        Create a new `Subprocess` task template operating on strings.
-
-        :param args: Positional arguments to pass to the subprocess.
-        :param kwargs: Keyword arguments to pass to the subprocess.
-        """
-
-        return (
-            Map(str.encode) | cls(*args, **kwargs) | Map(bytes.decode)
+        await self._handle_per_line(
+            self._stderr_delim,
+            proc_err,
+            _alog,
         )
 
+    async def exec(
+        self,
+        input_streams: GenCol[MemoryObjectReceiveStream[str]],
+        output_streams: GenCol[MemoryObjectSendStream[str]],
+    ):
+        """Create the computation process."""
 
-class Exec(SubprocessBase):
-    """Asynchronously run a subprocess."""
+        in_ = input_streams.require_single_key()
+        out = output_streams.require_single_key()
 
-    def __init__(self, program: str, *args: str, **kwargs):
-        """
-        Create a new `Exec` task template.
+        async with (
+            await open_process(self._cmd) as proc,
+            create_task_group() as tg,
+        ):
+            if not proc.stdin or not proc.stdout:
+                # Process must have stdin/stdout.
+                raise RuntimeError()
 
-        :param program: The program to run.
-        :param args: CLI arguments for the program.
-        :param kwargs: Keyword arguments to pass to the wrapped
-            :py:func:`asyncio.create_subprocess_exec`.
-        """
+            tg.start_soon(self._handle_stdin, in_, proc.stdin)
+            tg.start_soon(self._handle_stdout, proc.stdout, out)
 
-        super().__init__()
-        self._program = program
-        self._args = args
-        self._kwargs = kwargs
-
-    def _create_subprocess(self) -> Coroutine[None, None, Process]:
-        """Create the managed subprocess."""
-
-        return create_subprocess_exec(
-            self._program,
-            *self._args,
-            stdin=PIPE,
-            stdout=PIPE,
-            **self._kwargs,
-        )
-
-
-class Shell(SubprocessBase):
-    """Asynchronously run a shell command."""
-
-    def __init__(self, cmd: str, **kwargs):
-        """
-        Create a new `Shell` task template.
-
-        :param cmd: The shell command to run.
-        :param kwargs: Keyword arguments to pass to the wrapped
-            :py:func:`asyncio.create_subprocess_shell`.
-        """
-
-        super().__init__()
-        self._cmd = cmd
-        self._kwargs = kwargs
-
-    def _create_subprocess(self) -> Coroutine[None, None, Process]:
-        """Create the managed subprocess as a "shell" command."""
-
-        return create_subprocess_shell(
-            self._cmd,
-            stdin=PIPE,
-            stdout=PIPE,
-            **self._kwargs,
-        )
+            if proc.stderr:
+                tg.start_soon(self._handle_stderr, proc.stderr)

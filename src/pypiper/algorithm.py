@@ -1,21 +1,14 @@
-"""Common asynchrounous algorithms."""
+"""Common asyncronous algorithms."""
 
-from asyncio import (
-    FIRST_COMPLETED,
-    Future,
-    ensure_future,
-    gather,
-    wait,
-)
-from collections.abc import (
-    AsyncGenerator,
-    AsyncIterable,
-    AsyncIterator,
-    Callable,
-)
-from typing import Generic, TypeVar
+from collections.abc import AsyncGenerator, AsyncIterable, Callable
+from typing import TypeVar
 
-from pypiper.planning import Actor
+from anyio.streams.memory import (
+    MemoryObjectReceiveStream,
+    MemoryObjectSendStream,
+)
+
+from pypiper.planning import Actor, PortSpec
 from pypiper.utils import GenCol
 
 T = TypeVar("T")
@@ -23,8 +16,26 @@ TInput = TypeVar("TInput")
 TOutput = TypeVar("TOutput")
 
 
-class LinearActor(Generic[TInput, TOutput], Actor):
-    """Simple actor with a single input and a single output."""
+class GeneratorActor[TInput, TOutput](Actor):
+    """Single input/output Actor structured as a generator."""
+
+    async def exec(
+        self,
+        input_streams: GenCol[MemoryObjectReceiveStream],
+        output_streams: GenCol[MemoryObjectSendStream],
+    ):
+        """Create the computation process."""
+
+        self._validate_streams(input_streams, output_streams)
+
+        # in_ = input_streams.require_single_key()
+        # out = output_streams.require_single_key()
+        in_ = input_streams.sequence[0]
+        out = output_streams.sequence[0]
+
+        async with in_, out:
+            async for item in self._run(in_):
+                await out.send(item)
 
     def _run(
         self,
@@ -32,21 +43,13 @@ class LinearActor(Generic[TInput, TOutput], Actor):
     ) -> AsyncGenerator[TOutput, None]:
         raise NotImplementedError()
 
-    async def instantiate(
-        self,
-        input_streams: GenCol[AsyncIterable],
-    ) -> GenCol[AsyncIterable]:
-        """Create the computation graph using the given inputs."""
-        input_streams.require_single_key()
-        return input_streams.map(self._run)
 
-
-class Map(LinearActor[TInput, TOutput]):
+class Map(GeneratorActor[TInput, TOutput]):
     """Asyncronously map a function over an iterable."""
 
     def __init__(self, op: Callable[[TInput], TOutput]):
         """
-        Create a new `Map` task template.
+        Create a new `Map` actor.
 
         :param op: The function to invoke with each element.
         """
@@ -58,7 +61,7 @@ class Map(LinearActor[TInput, TOutput]):
         iterable: AsyncIterable[TInput],
     ) -> AsyncGenerator[TOutput, None]:
         """
-        Instantiate the task.
+        Instantiate the actor.
 
         Create an `AsyncGenerator` that invokes the `op` function on
         each item of `iterable` and yields the result.
@@ -74,12 +77,50 @@ class Map(LinearActor[TInput, TOutput]):
             yield op(item)
 
 
-class Filter(LinearActor[TInput, TInput]):
+class Foreach[TInput](Actor):
+    """Asyncronously call a function for every item with no output."""
+
+    def __init__(self, op: Callable[[TInput], None]):
+        """
+        Create a new `Foreach` actor.
+
+        :param op: The function to invoke with each element.
+        """
+
+        self._op = op
+
+    @property
+    def output_ports(self) -> PortSpec:
+        """No output ports."""
+        return PortSpec()
+
+    async def exec(
+        self,
+        input_streams: GenCol[MemoryObjectReceiveStream],
+        output_streams: GenCol[MemoryObjectSendStream],
+    ):
+        """Create the computation process."""
+
+        self._validate_streams(input_streams, output_streams)
+
+        # in_ = input_streams.require_single_key()
+        # if not output_streams.is_empty():
+        #     raise ValueError("Output must be empty.")
+        in_ = input_streams.sequence[0]
+
+        op = self._op
+
+        async with in_:
+            async for item in in_:
+                op(item)
+
+
+class Filter(GeneratorActor[TInput, TInput]):
     """Asyncronously filter an iterable."""
 
     def __init__(self, predicate: Callable[[TInput], bool]):
         """
-        Create a new `Filter` task template.
+        Create a new `Filter` actor.
 
         :param predicate: The function to check each element.
         """
@@ -91,7 +132,7 @@ class Filter(LinearActor[TInput, TInput]):
         iterable: AsyncIterable[TInput],
     ) -> AsyncGenerator[TInput, None]:
         """
-        Instantiate the task.
+        Instantiate the actor.
 
         Create an `AsyncGenerator` that yields each item of `iterable`
         for which the `predicate` function returns `True`.
@@ -110,21 +151,21 @@ class Filter(LinearActor[TInput, TInput]):
             #     print(f"Filter: (drop) '{item}'")
 
 
-class Sort(LinearActor[TInput, TInput]):
+class Sort(GeneratorActor[TInput, TInput]):
     """
     Syncronously sort an asynchronous iterable.
 
-    This task template is a little different than most others in that
-    it operates on a complete collection rather than a stream of
-    items. It accumulates an entire collection before sorting it.
-    After which it yields each item in sorted order. It still
-    maintains an asynchronous interface even though it basically
-    operates synchronously.
+    This actor is a little different than most others in that it
+    operates on a complete collection rather than a stream of items.
+    It accumulates an entire collection before sorting it. After
+    which it yields each item in sorted order. It still maintains an
+    asynchronous interface even though it basically operates
+    synchronously.
     """
 
     def __init__(self, **kwargs):
         """
-        Create a new `Sort` task template.
+        Create a new `Sort` actor.
 
         :param kwargs: The keyword arguments to pass to the
             built-in :py:func:`sorted`.
@@ -137,7 +178,7 @@ class Sort(LinearActor[TInput, TInput]):
         iterable: AsyncIterable[TInput],
     ) -> AsyncGenerator[TInput, None]:
         """
-        Instantiate the task.
+        Instantiate the actor.
 
         Create an `AsyncGenerator` that asychronously accumulates the
         items of `iterable`, sorts them, then yields each item in
@@ -153,65 +194,3 @@ class Sort(LinearActor[TInput, TInput]):
         items = sorted([x async for x in iterable], **kwargs)
         for x in items:
             yield x
-
-
-async def azip(*iterables: AsyncIterable) -> AsyncGenerator:
-    """
-    Asyncronously zip a collection of iterables.
-
-    Join together multiple async iterables and yield them in lock-step
-    with each other. This is similar to the built-in :py:func:`zip`
-    except it is asyncronous.
-
-    If any of the iterables is exhausted, the generator will stop and
-    the rest of the iterables will remain unexhausted.
-
-    :param iterables: The iterables to zip together.
-
-    :return: An `AsyncGenerator` that zips together the iterables.
-    """
-
-    iterators = [aiter(x) for x in iterables]
-    while True:
-        next_items = [anext(it) for it in iterators]
-        yield tuple(await gather(*next_items))
-
-
-async def merge(
-    *iterables: AsyncIterable[TInput],
-) -> AsyncGenerator[TInput, None]:
-    """
-    Asyncronously merge a collection of iterables.
-
-    Join together multiple async iterables and yield the items as they
-    are ready. This is similar to :py:func:`itertools.chain` except it
-    is asyncronous and the order of items from different iterables can
-    vary. Relative order of items from the same iterable is preserved.
-
-    :param iterables: The iterables to merge together.
-
-    :return: An `AsyncGenerator` that merges the iterables.
-    """
-
-    iters: dict[Future[TInput], AsyncIterator[TInput]] = {}
-    for iterable in iterables:
-        it = aiter(iterable)
-        iters[ensure_future(anext(it))] = it
-    pending = set(iters.keys())
-
-    while pending:
-        done, pending = await wait(
-            pending,
-            return_when=FIRST_COMPLETED,
-        )
-
-        for fut in done:
-            yield await fut
-            it = iters.pop(fut)
-            try:
-                next_fut = ensure_future(anext(it))
-                iters[next_fut] = it
-                pending.add(next_fut)
-            except StopAsyncIteration:
-                # This iterable is exhausted.
-                continue

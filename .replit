@@ -1,5 +1,5 @@
 entrypoint = "run_tests.py"
-modules = ["python-3.10"]
+modules = ["python-3.12"]
 
 [nix]
 channel = "stable-23_05"
